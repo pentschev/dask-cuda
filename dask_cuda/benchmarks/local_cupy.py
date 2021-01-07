@@ -95,6 +95,11 @@ async def run(args):
 
     filterwarnings("ignore", message=".*NVLink.*rmm_pool_size.*", category=UserWarning)
 
+    if args.enable_ptds:
+        import os
+        os.environ["RMM_PER_THREAD_DEFAULT_STREAM"] = "1"
+        os.environ["CUPY_CUDA_PER_THREAD_DEFAULT_STREAM"] = "1"
+
     async with Cluster(*cluster_args, **cluster_kwargs, asynchronous=True) as cluster:
         if args.multi_node:
             import time
@@ -162,6 +167,7 @@ async def run(args):
                 print(f"Protocol           | {args.protocol}")
                 print(f"Device(s)          | {args.devs}")
                 print(f"Worker Thread(s)   | {args.threads_per_worker}")
+                print(f"PTDS enabled       | {args.enable_ptds}")
                 print("==========================")
                 print("Wall-clock         | npartitions")
                 print("--------------------------")
@@ -196,6 +202,7 @@ async def run(args):
                             "Protocol": args.protocol,
                             "Device(s)": args.devs,
                             "Worker Thread(s)": args.threads_per_worker,
+                            "PTDS enabled": args.enable_ptds,
                             "Wall-clock": format_time(took),
                             "npartitions": npartitions,
                         },
@@ -257,6 +264,11 @@ def parse_args():
             "default": "formatted",
             "type": str,
             "help": "Type of report, valid options are: 'formatted' (default), 'csv'.",
+        },
+        {
+            "name": "--enable-ptds",
+            "action": "store_true",
+            "help": "Enable Per-Thread Default Stream",
         },
         {"name": "--runs", "default": 3, "type": int, "help": "Number of runs",},
     ]
