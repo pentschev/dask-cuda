@@ -149,35 +149,59 @@ async def run(args):
                 for (w1, w2), nb in total_nbytes.items()
             }
 
-            print("Roundtrip benchmark")
-            print("--------------------------")
-            print(f"Operation          | {args.operation}")
-            print(f"User size          | {args.size}")
-            print(f"User second size   | {args.second_size}")
-            print(f"User chunk-size    | {args.chunk_size}")
-            print(f"Compute shape      | {size}")
-            print(f"Compute chunk-size | {chunksize}")
-            print(f"Ignore-size        | {format_bytes(args.ignore_size)}")
-            print(f"Protocol           | {args.protocol}")
-            print(f"Device(s)          | {args.devs}")
-            print(f"Worker Thread(s)   | {args.threads_per_worker}")
-            print("==========================")
-            print("Wall-clock         | npartitions")
-            print("--------------------------")
-            for (took, npartitions) in took_list:
-                t = format_time(took)
-                t += " " * (11 - len(t))
-                print(f"{t}        | {npartitions}")
-            print("==========================")
-            print("(w1,w2)            | 25% 50% 75% (total nbytes)")
-            print("--------------------------")
-            for (d1, d2), bw in sorted(bandwidths.items()):
-                fmt = (
-                    "(%s,%s)            | %s %s %s (%s)"
-                    if args.multi_node or args.sched_addr
-                    else "(%02d,%02d)            | %s %s %s (%s)"
-                )
-                print(fmt % (d1, d2, bw[0], bw[1], bw[2], total_nbytes[(d1, d2)]))
+            if args.report_type == "formatted":
+                print("Roundtrip benchmark")
+                print("--------------------------")
+                print(f"Operation          | {args.operation}")
+                print(f"User size          | {args.size}")
+                print(f"User second size   | {args.second_size}")
+                print(f"User chunk-size    | {args.chunk_size}")
+                print(f"Compute shape      | {size}")
+                print(f"Compute chunk-size | {chunksize}")
+                print(f"Ignore-size        | {format_bytes(args.ignore_size)}")
+                print(f"Protocol           | {args.protocol}")
+                print(f"Device(s)          | {args.devs}")
+                print(f"Worker Thread(s)   | {args.threads_per_worker}")
+                print("==========================")
+                print("Wall-clock         | npartitions")
+                print("--------------------------")
+                for (took, npartitions) in took_list:
+                    t = format_time(took)
+                    t += " " * (11 - len(t))
+                    print(f"{t}        | {npartitions}")
+                print("==========================")
+                print("(w1,w2)            | 25% 50% 75% (total nbytes)")
+                print("--------------------------")
+                for (d1, d2), bw in sorted(bandwidths.items()):
+                    fmt = (
+                        "(%s,%s)            | %s %s %s (%s)"
+                        if args.multi_node or args.sched_addr
+                        else "(%02d,%02d)            | %s %s %s (%s)"
+                    )
+                    print(fmt % (d1, d2, bw[0], bw[1], bw[2], total_nbytes[(d1, d2)]))
+            elif args.report_type == "csv":
+                import pandas as pd
+
+                df = pd.DataFrame()
+                for (took, npartitions) in took_list:
+                    df = df.append(
+                        {
+                            "Operation": args.operation,
+                            "User size": args.size,
+                            "User second size": args.second_size,
+                            "User chunk-size": args.chunk_size,
+                            "Compute shape": size,
+                            "Compute chunk-size": chunksize,
+                            "Ignore-size": format_bytes(args.ignore_size),
+                            "Protocol": args.protocol,
+                            "Device(s)": args.devs,
+                            "Worker Thread(s)": args.threads_per_worker,
+                            "Wall-clock": format_time(took),
+                            "npartitions": npartitions,
+                        },
+                        ignore_index=True,
+                    )
+                print(df.to_csv(None))
 
             # An SSHCluster will not automatically shut down, we have to
             # ensure it does.
@@ -227,6 +251,12 @@ def parse_args():
             "metavar": "nbytes",
             "type": parse_bytes,
             "help": "Ignore messages smaller than this (default '1 MB')",
+        },
+        {
+            "name": "--report-type",
+            "default": "formatted",
+            "type": str,
+            "help": "Type of report, valid options are: 'formatted' (default), 'csv'.",
         },
         {"name": "--runs", "default": 3, "type": int, "help": "Number of runs",},
     ]
