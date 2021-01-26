@@ -16,6 +16,7 @@ import dask.dataframe.utils
 import distributed.protocol
 import distributed.utils
 from dask.sizeof import sizeof
+from distributed.worker import dumps_function, loads_function
 
 from .get_device_memory_objects import get_device_memory_objects
 from .is_device_object import is_device_object
@@ -59,13 +60,17 @@ def asproxy(obj, serializers=None, subclass=None) -> "ProxyObject":
 
         if subclass is None:
             subclass = ProxyObject
+            subclass_serialized = None
+        else:
+            subclass_serialized = dumps_function(subclass)
+
         ret = subclass(
             obj=obj,
             fixed_attr=fixed_attr,
             type_serialized=pickle.dumps(type(obj)),
             typename=dask.utils.typename(type(obj)),
             is_cuda_object=is_device_object(obj),
-            subclass=pickle.dumps(subclass) if subclass else None,
+            subclass=subclass_serialized,
             serializers=None,
         )
     if serializers is not None:
@@ -335,7 +340,7 @@ class ProxyObject:
         self._obj_pxy_serialize(serializers=("pickle",))
         args = self._obj_pxy_get_init_args()
         if args["subclass"]:
-            subclass = pickle.loads(args["subclass"])
+            subclass = loads_function(args["subclass"])
         else:
             subclass = ProxyObject
 
@@ -671,20 +676,14 @@ def obj_pxy_dask_deserialize(header, frames):
     if meta["subclass"] is None:
         subclass = ProxyObject
     else:
-        subclass = pickle.loads(meta["subclass"])
+        subclass = loads_function(meta["subclass"])
     return subclass(obj=(header["proxied-header"], frames), **header["obj-pxy-meta"],)
-
-
-@dask.dataframe.utils.make_meta.register(ProxyObject)
-def make_meta_proxy_object(obj: ProxyObject, index=None):
-    return dask.dataframe.utils.make_meta(obj._obj_pxy_deserialize(), index)
 
 
 @dask.dataframe.core.get_parallel_type.register(ProxyObject)
 def get_parallel_type_proxy_object(obj: ProxyObject):
-    obj_type = pickle.loads(obj._obj_pxy["type_serialized"])
     # Notice, `get_parallel_type()` needs a instance not a type object
-    return dask.dataframe.core.get_parallel_type(obj_type.__new__(obj_type))
+    return dask.dataframe.core.get_parallel_type(obj.__class__.__new__(obj.__class__))
 
 
 def unproxify_input_wrapper(func):
@@ -702,6 +701,7 @@ def unproxify_input_wrapper(func):
 # Register dispatch of ProxyObject on all known dispatch objects
 for dispatch in (
     dask.dataframe.utils.hash_object_dispatch,
+    dask.dataframe.utils.make_meta,
     dask.dataframe.utils.make_scalar,
     dask.dataframe.utils.group_split_dispatch,
     dask.array.core.tensordot_lookup,
