@@ -193,7 +193,7 @@ async def test_cupy_cluster_device_spill(params):
     cupy = pytest.importorskip("cupy")
     with dask.config.set({"distributed.worker.memory.terminate": False}):
         async with LocalCUDACluster(
-            1,
+            n_workers=1,
             scheduler_port=0,
             silence_logs=False,
             dashboard_address=None,
@@ -359,7 +359,7 @@ async def test_cudf_cluster_device_spill(params):
     cudf = pytest.importorskip("cudf")
     with dask.config.set({"distributed.worker.memory.terminate": False}):
         async with LocalCUDACluster(
-            1,
+            n_workers=1,
             device_memory_limit=params["device_memory_limit"],
             memory_limit=params["memory_limit"],
             memory_target_fraction=params["host_target"],
