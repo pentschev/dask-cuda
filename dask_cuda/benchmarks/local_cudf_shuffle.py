@@ -160,6 +160,7 @@ def main(args):
         print(f"tcp            | {args.enable_tcp_over_ucx}")
         print(f"ib             | {args.enable_infiniband}")
         print(f"nvlink         | {args.enable_nvlink}")
+        print(f"message api    | {'AM' if args.enable_am else 'TAG'}")
     print(f"data-processed | {format_bytes(took_list[0][0])}")
     print("===============================")
     print("Wall-clock     | Throughput")
