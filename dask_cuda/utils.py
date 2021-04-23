@@ -223,6 +223,7 @@ def get_ucx_config(
     enable_infiniband=False,
     enable_nvlink=False,
     enable_rdmacm=False,
+    enable_am=False,
     net_devices="",
     cuda_device_index=None,
 ):
@@ -240,6 +241,7 @@ def get_ucx_config(
         "net-devices": None,
         "cuda_copy": None,
         "reuse-endpoints": True,
+        "am": False,
     }
     if enable_tcp_over_ucx or enable_infiniband or enable_nvlink:
         ucx_config["cuda_copy"] = True
@@ -251,6 +253,8 @@ def get_ucx_config(
         ucx_config["nvlink"] = True
     if enable_rdmacm:
         ucx_config["rdmacm"] = True
+    if enable_am:
+        ucx_config["am"] = True
 
     if net_devices is not None and net_devices != "":
         ucx_config["net-devices"] = get_ucx_net_devices(cuda_device_index, net_devices)
@@ -264,6 +268,7 @@ def get_preload_options(
     enable_infiniband=False,
     enable_nvlink=False,
     enable_rdmacm=False,
+    enable_am=False,
     ucx_net_devices="",
     cuda_device_index=0,
 ):
@@ -291,6 +296,9 @@ def get_preload_options(
     enable_nvlink: bool
         Set environment variables to enable UCX NVLink support. Implies
         enable_tcp=True.
+    enable_am: bool
+        Set Dask/Distributed configuration to enable and use UCX Active Messages
+        API in substitution to the TAG API.
     ucx_net_devices: str or callable
         A string with the interface name to be used for all devices (empty
         string means use default), or a callable function taking an integer
@@ -327,6 +335,8 @@ def get_preload_options(
             initialize_ucx_argv.append("--enable-rdmacm")
         if enable_nvlink:
             initialize_ucx_argv.append("--enable-nvlink")
+        if enable_am:
+            initialize_ucx_argv.append("--enable-am")
         if ucx_net_devices is not None and ucx_net_devices != "":
             net_dev = get_ucx_net_devices(cuda_device_index, ucx_net_devices)
             initialize_ucx_argv.append("--net-devices=%s" % net_dev)

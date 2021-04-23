@@ -222,6 +222,13 @@ pem_file_option_type = click.Path(exists=True, resolve_path=True)
     requires ``--enable-infiniband``.""",
 )
 @click.option(
+    "--enable-am/--disable-am",
+    default=False,
+    show_default=True,
+    help="""Set Dask/Distributed configuration to enable and use UCX Active Messages
+    API in substitution to the TAG API.""",
+)
+@click.option(
     "--net-devices",
     type=str,
     default=None,

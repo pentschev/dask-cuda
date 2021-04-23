@@ -16,6 +16,7 @@ def initialize(
     enable_infiniband=False,
     enable_nvlink=False,
     enable_rdmacm=False,
+    enable_am=False,
     net_devices="",
     cuda_device_index=None,
 ):
@@ -62,6 +63,9 @@ def initialize(
     enable_rdmacm : bool, default False
         Set environment variables to enable UCX RDMA connection manager support,
         requires ``enable_infiniband=True``.
+    enable_am : bool, default False
+        Set Dask configuration to enable and use UCX Active Messages API in
+        substitution to the TAG API.
     net_devices : str or callable, default ""
         Interface(s) used by workers for UCX communication. Can be a string (like
         ``"eth0"`` for NVLink, ``"mlx5_0:1"``/``"ib0"`` for InfiniBand, or ``""`` to use
@@ -89,6 +93,7 @@ def initialize(
         enable_infiniband=enable_infiniband,
         enable_nvlink=enable_nvlink,
         enable_rdmacm=enable_rdmacm,
+        enable_am=enable_am,
         net_devices=net_devices,
         cuda_device_index=cuda_device_index,
     )
@@ -122,6 +127,11 @@ def initialize(
     help="Enable RDMA connection manager, currently requires InfiniBand enabled.",
 )
 @click.option(
+    "--enable-am/--disable-am",
+    default=False,
+    help="Enable and use the UCX Active Messages API for Dask/Distributed transfers.",
+)
+@click.option(
     "--net-devices",
     type=str,
     default=None,
@@ -135,6 +145,7 @@ def dask_setup(
     enable_infiniband,
     enable_nvlink,
     enable_rdmacm,
+    enable_am,
     net_devices,
 ):
     if create_cuda_context:

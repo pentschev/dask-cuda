@@ -79,6 +79,12 @@ def parse_benchmark_args(description="Generic dask-cuda Benchmark", args_list=[]
         help="Enable RDMACM with UCX.",
     )
     parser.add_argument(
+        "--enable-am",
+        action="store_true",
+        dest="enable_am",
+        help="Enable and use UCX Active Messages API.",
+    )
+    parser.add_argument(
         "--disable-tcp-over-ucx",
         action="store_false",
         dest="enable_tcp_over_ucx",
@@ -101,6 +107,12 @@ def parse_benchmark_args(description="Generic dask-cuda Benchmark", args_list=[]
         action="store_false",
         dest="enable_rdmacm",
         help="Disable RDMACM with UCX.",
+    )
+    parser.add_argument(
+        "--disable-am",
+        action="store_true",
+        dest="disable_am",
+        help="Disable usage of UCX Active Messages API (i.e., use TAG API).",
     )
     parser.add_argument(
         "--ucx-net-devices",
@@ -156,6 +168,7 @@ def parse_benchmark_args(description="Generic dask-cuda Benchmark", args_list=[]
         enable_infiniband=True,
         enable_nvlink=True,
         enable_rdmacm=False,
+        enable_am=False,
     )
     args = parser.parse_args()
 
@@ -190,6 +203,8 @@ def get_cluster_options(args):
             worker_options["enable_infiniband"] = ""
         if args.enable_rdmacm:
             worker_options["enable_rdmacm"] = ""
+        if args.enable_rdmacm:
+            worker_options["enable_am"] = ""
 
         if args.ucx_net_devices:
             worker_options["ucx_net_devices"] = args.ucx_net_devices
@@ -216,6 +231,7 @@ def get_cluster_options(args):
             "enable_infiniband": args.enable_infiniband,
             "enable_nvlink": args.enable_nvlink,
             "enable_rdmacm": args.enable_rdmacm,
+            "enable_am": args.enable_am,
         }
 
     return {

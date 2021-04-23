@@ -72,6 +72,7 @@ class CUDAWorker:
         enable_infiniband=False,
         enable_nvlink=False,
         enable_rdmacm=False,
+        enable_am=False,
         net_devices=None,
         jit_unspill=None,
         **kwargs,
@@ -169,6 +170,7 @@ class CUDAWorker:
             enable_infiniband=enable_infiniband,
             enable_nvlink=enable_nvlink,
             enable_rdmacm=enable_rdmacm,
+            enable_am=enable_am,
             net_devices=net_devices,
             cuda_device_index=0,
         )
@@ -230,6 +232,7 @@ class CUDAWorker:
                         enable_infiniband=enable_infiniband,
                         enable_nvlink=enable_nvlink,
                         enable_rdmacm=enable_rdmacm,
+                        enable_am=enable_am,
                         net_devices=net_devices,
                         cuda_device_index=i,
                     )

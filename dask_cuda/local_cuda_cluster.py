@@ -90,6 +90,9 @@ class LocalCUDACluster(LocalCluster):
     enable_rdmacm : bool, default False
         Set environment variables to enable UCX RDMA connection manager support,
         requires ``protocol="ucx"`` and ``enable_infiniband=True``.
+    enable_am : bool
+        Set Dask/Distributed configuration to enable and use UCX Active Messages
+        API in substitution to the TAG API.
     ucx_net_devices : str, callable, or None, default None
         Interface(s) used by workers for UCX communication. Can be a string (like
         ``"eth0"`` for NVLink or ``"mlx5_0:1"``/``"ib0"`` for InfiniBand), a callable
@@ -183,6 +186,7 @@ class LocalCUDACluster(LocalCluster):
         enable_infiniband=False,
         enable_nvlink=False,
         enable_rdmacm=False,
+        enable_am=False,
         ucx_net_devices=None,
         rmm_pool_size=None,
         rmm_managed_memory=False,
@@ -277,7 +281,7 @@ class LocalCUDACluster(LocalCluster):
                     },
                 )
 
-        if enable_tcp_over_ucx or enable_infiniband or enable_nvlink:
+        if enable_tcp_over_ucx or enable_infiniband or enable_nvlink or enable_am:
             if protocol is None:
                 protocol = "ucx"
             elif protocol != "ucx":
@@ -302,6 +306,7 @@ class LocalCUDACluster(LocalCluster):
             enable_nvlink=enable_nvlink,
             enable_infiniband=enable_infiniband,
             enable_rdmacm=enable_rdmacm,
+            enable_am=enable_am,
             net_devices=ucx_net_devices,
             cuda_device_index=0,
         )
@@ -321,6 +326,7 @@ class LocalCUDACluster(LocalCluster):
                     enable_nvlink=enable_nvlink,
                     enable_infiniband=enable_infiniband,
                     enable_rdmacm=enable_rdmacm,
+                    enable_am=enable_am,
                 )
             },
             **kwargs,
