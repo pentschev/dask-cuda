@@ -13,8 +13,8 @@ from distributed.deploy.local import LocalCluster
 
 import dask_cuda
 from dask_cuda.explicit_comms import comms
-from dask_cuda.explicit_comms.dataframe.merge import merge as explicit_comms_merge
 from dask_cuda.explicit_comms.dataframe.shuffle import shuffle as explicit_comms_shuffle
+from dask_cuda.initialize import initialize
 
 mp = mp.get_context("spawn")
 ucp = pytest.importorskip("ucp")
@@ -28,6 +28,12 @@ async def my_rank(state, arg):
 
 
 def _test_local_cluster(protocol):
+    dask.config.update(
+        dask.config.global_config,
+        {"ucx": {"tcp": True, "cuda_copy": True,},},
+        priority="new",
+    )
+
     with LocalCluster(
         protocol=protocol,
         dashboard_address=None,
@@ -43,67 +49,6 @@ def _test_local_cluster(protocol):
 @pytest.mark.parametrize("protocol", ["tcp", "ucx"])
 def test_local_cluster(protocol):
     p = mp.Process(target=_test_local_cluster, args=(protocol,))
-    p.start()
-    p.join()
-    assert not p.exitcode
-
-
-def _test_dataframe_merge(backend, protocol, n_workers):
-    if backend == "cudf":
-        cudf = pytest.importorskip("cudf")
-        from cudf.tests.utils import assert_eq
-    else:
-        from dask.dataframe.utils import assert_eq
-
-    dask.config.update(
-        dask.config.global_config,
-        {"ucx": {"TLS": "tcp,sockcm,cuda_copy",},},
-        priority="new",
-    )
-
-    with LocalCluster(
-        protocol=protocol,
-        dashboard_address=None,
-        n_workers=n_workers,
-        threads_per_worker=1,
-        processes=True,
-    ) as cluster:
-        with Client(cluster):
-            nrows = n_workers * 10
-
-            # Let's make some dataframes that we can join on the "key" column
-            df1 = pd.DataFrame({"key": np.arange(nrows), "payload1": np.arange(nrows)})
-            key = np.arange(nrows)
-            np.random.shuffle(key)
-            df2 = pd.DataFrame(
-                {"key": key[nrows // 3 :], "payload2": np.arange(nrows)[nrows // 3 :]}
-            )
-            expected = df1.merge(df2).set_index("key")
-
-            if backend == "cudf":
-                df1 = cudf.DataFrame.from_pandas(df1)
-                df2 = cudf.DataFrame.from_pandas(df2)
-
-            ddf1 = dd.from_pandas(df1, npartitions=n_workers + 1)
-            ddf2 = dd.from_pandas(
-                df2, npartitions=n_workers - 1 if n_workers > 1 else 1
-            )
-            ddf3 = explicit_comms_merge(ddf1, ddf2, on="key").set_index("key")
-            got = ddf3.compute()
-
-            if backend == "cudf":
-                assert_eq(got, expected)
-            else:
-                pd.testing.assert_frame_equal(got, expected)
-
-
-@pytest.mark.parametrize("nworkers", [1, 2, 4])
-@pytest.mark.parametrize("backend", ["pandas", "cudf"])
-@pytest.mark.parametrize("protocol", ["tcp", "ucx"])
-def test_dataframe_merge(backend, protocol, nworkers):
-    if backend == "cudf":
-        pytest.importorskip("cudf")
-    p = mp.Process(target=_test_dataframe_merge, args=(backend, protocol, nworkers))
     p.start()
     p.join()
     assert not p.exitcode
@@ -125,9 +70,10 @@ def _test_dataframe_merge_empty_partitions(nrows, npartitions):
             expected = df1.merge(df2).set_index("key")
             ddf1 = dd.from_pandas(df1, npartitions=npartitions)
             ddf2 = dd.from_pandas(df2, npartitions=npartitions)
-            ddf3 = explicit_comms_merge(ddf1, ddf2, on=["key"]).set_index("key")
-            got = ddf3.compute()
-            pd.testing.assert_frame_equal(got, expected)
+            with dask.config.set(explicit_comms=True):
+                ddf3 = ddf1.merge(ddf2, on=["key"]).set_index("key")
+                got = ddf3.compute()
+                pd.testing.assert_frame_equal(got, expected)
 
 
 def test_dataframe_merge_empty_partitions():
@@ -151,14 +97,16 @@ def _test_dataframe_shuffle(backend, protocol, n_workers):
     if backend == "cudf":
         cudf = pytest.importorskip("cudf")
         from cudf.tests.utils import assert_eq
+
+        initialize(enable_tcp_over_ucx=True)
     else:
         from dask.dataframe.utils import assert_eq
 
-    dask.config.update(
-        dask.config.global_config,
-        {"ucx": {"TLS": "tcp,sockcm,cuda_copy",},},
-        priority="new",
-    )
+        dask.config.update(
+            dask.config.global_config,
+            {"ucx": {"tcp": True, "cuda_copy": True,},},
+            priority="new",
+        )
 
     with LocalCluster(
         protocol=protocol,
@@ -216,21 +164,20 @@ def test_dataframe_shuffle(backend, protocol, nworkers):
 
 def _test_dask_use_explicit_comms():
     def check_shuffle(in_cluster):
-        """Check if shuffle use explicit-comms by search for keys named "shuffle"
-
-        The explicit-comms implemention of shuffle doesn't produce any keys
-        named "shuffle"
+        """Check if shuffle use explicit-comms by search for keys named
+        'explicit-comms-shuffle'
         """
+        name = "explicit-comms-shuffle"
         ddf = dd.from_pandas(pd.DataFrame({"key": np.arange(10)}), npartitions=2)
         with dask.config.set(explicit_comms=False):
             res = ddf.shuffle(on="key", npartitions=4, shuffle="tasks")
-            assert any(["shuffle" in str(key) for key in res.dask])
+            assert all(name not in str(key) for key in res.dask)
         with dask.config.set(explicit_comms=True):
             res = ddf.shuffle(on="key", npartitions=4, shuffle="tasks")
             if in_cluster:
-                assert all(["shuffle" not in str(key) for key in res.dask])
+                assert any(name in str(key) for key in res.dask)
             else:  # If not in cluster, we cannot use explicit comms
-                assert any(["shuffle" in str(key) for key in res.dask])
+                assert all(name not in str(key) for key in res.dask)
 
     with LocalCluster(
         protocol="tcp",
@@ -251,15 +198,73 @@ def test_dask_use_explicit_comms():
     assert not p.exitcode
 
 
+def _test_dataframe_shuffle_merge(backend, protocol, n_workers):
+    if backend == "cudf":
+        cudf = pytest.importorskip("cudf")
+        from cudf.tests.utils import assert_eq
+
+        initialize(enable_tcp_over_ucx=True)
+    else:
+        from dask.dataframe.utils import assert_eq
+
+        dask.config.update(
+            dask.config.global_config,
+            {"ucx": {"tcp": True, "cuda_copy": True,},},
+            priority="new",
+        )
+
+    with LocalCluster(
+        protocol=protocol,
+        dashboard_address=None,
+        n_workers=n_workers,
+        threads_per_worker=1,
+        processes=True,
+    ) as cluster:
+        with Client(cluster):
+            nrows = n_workers * 10
+
+            # Let's make some dataframes that we can join on the "key" column
+            df1 = pd.DataFrame({"key": np.arange(nrows), "payload1": np.arange(nrows)})
+            key = np.arange(nrows)
+            np.random.shuffle(key)
+            df2 = pd.DataFrame(
+                {"key": key[nrows // 3 :], "payload2": np.arange(nrows)[nrows // 3 :]}
+            )
+            expected = df1.merge(df2, on="key").set_index("key")
+
+            if backend == "cudf":
+                df1 = cudf.DataFrame.from_pandas(df1)
+                df2 = cudf.DataFrame.from_pandas(df2)
+
+            ddf1 = dd.from_pandas(df1, npartitions=n_workers + 1)
+            ddf2 = dd.from_pandas(
+                df2, npartitions=n_workers - 1 if n_workers > 1 else 1
+            )
+            with dask.config.set(explicit_comms=True):
+                got = ddf1.merge(ddf2, on="key").set_index("key").compute()
+            if backend == "cudf":
+                assert_eq(got, expected)
+            else:
+                pd.testing.assert_frame_equal(got, expected)
+
+
+@pytest.mark.parametrize("nworkers", [1, 2, 4])
+@pytest.mark.parametrize("backend", ["pandas", "cudf"])
+@pytest.mark.parametrize("protocol", ["tcp", "ucx"])
+def test_dataframe_shuffle_merge(backend, protocol, nworkers):
+    if backend == "cudf":
+        pytest.importorskip("cudf")
+    p = mp.Process(
+        target=_test_dataframe_shuffle_merge, args=(backend, protocol, nworkers)
+    )
+    p.start()
+    p.join()
+    assert not p.exitcode
+
+
 def _test_jit_unspill(protocol):
     import cudf
     from cudf.tests.utils import assert_eq
-
-    dask.config.update(
-        dask.config.global_config,
-        {"ucx": {"TLS": "tcp,sockcm,cuda_copy",},},
-        priority="new",
-    )
 
     with dask_cuda.LocalCUDACluster(
         protocol=protocol,
@@ -268,6 +273,7 @@ def _test_jit_unspill(protocol):
         threads_per_worker=1,
         jit_unspill=True,
         device_memory_limit="1B",
+        enable_tcp_over_ucx=True if protocol == "ucx" else False,
     ) as cluster:
         with Client(cluster):
             np.random.seed(42)

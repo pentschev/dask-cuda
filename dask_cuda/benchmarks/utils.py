@@ -122,6 +122,18 @@ def parse_benchmark_args(description="Generic dask-cuda Benchmark", args_list=[]
         "Ignored if protocol is 'tcp'",
     )
     parser.add_argument(
+        "--interface",
+        default=None,
+        type=str,
+        dest="interface",
+        help="Network interface Dask processes will use to listen for connections.",
+    )
+    parser.add_argument(
+        "--no-silence-logs",
+        action="store_true",
+        help="By default Dask logs are silenced, this argument unsilence them.",
+    )
+    parser.add_argument(
         "--multi-node",
         action="store_true",
         dest="multi_node",
@@ -232,7 +244,10 @@ def get_cluster_options(args):
             "enable_nvlink": args.enable_nvlink,
             "enable_rdmacm": args.enable_rdmacm,
             "enable_am": args.enable_am,
+            "interface": args.interface,
         }
+        if args.no_silence_logs:
+            cluster_kwargs["silence_logs"] = False
 
     return {
         "class": Cluster,
