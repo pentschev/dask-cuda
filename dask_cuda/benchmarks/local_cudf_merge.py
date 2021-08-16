@@ -1,6 +1,8 @@
+import contextlib
 import math
 from collections import defaultdict
-from time import perf_counter as clock
+from json import dumps
+from time import perf_counter
 from warnings import filterwarnings
 
 import numpy
@@ -134,7 +136,7 @@ def get_random_ddf(chunk_size, num_chunks, frac_match, chunk_type, args):
     return ddf
 
 
-def merge(args, ddf1, ddf2, write_profile):
+def merge(args, ddf1, ddf2):
 
     # Allow default broadcast behavior, unless
     # "--shuffle-join" or "--broadcast-join" was
@@ -142,22 +144,11 @@ def merge(args, ddf1, ddf2, write_profile):
     # precedence)
     broadcast = False if args.shuffle_join else (True if args.broadcast_join else None)
 
-    # Lazy merge/join operation
-    ddf_join = ddf1.merge(ddf2, on=["key"], how="inner", broadcast=broadcast,)
+    # The merge/join operation
+    ddf_join = ddf1.merge(ddf2, on=["key"], how="inner", broadcast=broadcast)
     if args.set_index:
         ddf_join = ddf_join.set_index("key")
-
-    # Execute the operations to benchmark
-    if write_profile is not None:
-        with performance_report(filename=args.profile):
-            t1 = clock()
-            wait(ddf_join.persist())
-            took = clock() - t1
-    else:
-        t1 = clock()
-        wait(ddf_join.persist())
-        took = clock() - t1
-    return took
+    wait(ddf_join.persist())
 
 
 def run(client, args, n_workers, write_profile=None):
@@ -176,13 +167,20 @@ def run(client, args, n_workers, write_profile=None):
     data_processed = len(ddf_base) * sum([t.itemsize for t in ddf_base.dtypes])
     data_processed += len(ddf_other) * sum([t.itemsize for t in ddf_other.dtypes])
 
-    if args.backend == "dask":
-        took = merge(args, ddf_base, ddf_other, write_profile)
-    else:
-        with dask.config.set(explicit_comms=True):
-            took = merge(args, ddf_base, ddf_other, write_profile)
+    # Get contexts to use (defaults to null contexts that doesn't do anything)
+    ctx1, ctx2 = contextlib.nullcontext(), contextlib.nullcontext()
+    if args.backend == "explicit-comms":
+        ctx1 = dask.config.set(explicit_comms=True)
+    if write_profile is not None:
+        ctx2 = performance_report(filename=args.profile)
 
-    return (data_processed, took)
+    with ctx1:
+        with ctx2:
+            t1 = perf_counter()
+            merge(args, ddf_base, ddf_other)
+            t2 = perf_counter()
+
+    return (data_processed, t2 - t1)
 
 
 def main(args):
@@ -281,6 +279,8 @@ def main(args):
     print(f"broadcast      | {broadcast}")
     print(f"protocol       | {args.protocol}")
     print(f"device(s)      | {args.devs}")
+    if args.device_memory_limit:
+        print(f"memory-limit   | {format_bytes(args.device_memory_limit)}")
     print(f"rmm-pool       | {(not args.disable_rmm_pool)}")
     print(f"frac-match     | {args.frac_match}")
     if args.protocol == "ucx":
@@ -308,17 +308,58 @@ def main(args):
     if args.backend == "dask":
         if args.markdown:
             print("<details>\n<summary>Worker-Worker Transfer Rates</summary>\n\n```")
-        print("(w1,w2)     | 25% 50% 75% (total nbytes)")
+        print("(w1,w2)        | 25% 50% 75% (total nbytes)")
         print("-------------------------------")
         for (d1, d2), bw in sorted(bandwidths.items()):
             fmt = (
-                "(%s,%s)     | %s %s %s (%s)"
+                "(%s,%s)        | %s %s %s (%s)"
                 if args.multi_node or args.sched_addr
-                else "(%02d,%02d)     | %s %s %s (%s)"
+                else "(%02d,%02d)        | %s %s %s (%s)"
             )
             print(fmt % (d1, d2, bw[0], bw[1], bw[2], total_nbytes[(d1, d2)]))
         if args.markdown:
             print("```\n</details>\n")
+
+    if args.benchmark_json:
+        bandwidths_json = {
+            "bandwidth_({d1},{d2})_{i}"
+            if args.multi_node or args.sched_addr
+            else "(%02d,%02d)_%s" % (d1, d2, i): parse_bytes(v.rstrip("/s"))
+            for (d1, d2), bw in sorted(bandwidths.items())
+            for i, v in zip(
+                ["25%", "50%", "75%", "total_nbytes"],
+                [bw[0], bw[1], bw[2], total_nbytes[(d1, d2)]],
+            )
+        }
+
+        with open(args.benchmark_json, "a") as fp:
+            for data_processed, took in took_list:
+                fp.write(
+                    dumps(
+                        dict(
+                            {
+                                "backend": args.backend,
+                                "merge_type": args.type,
+                                "rows_per_chunk": args.chunk_size,
+                                "base_chunks": args.base_chunks,
+                                "other_chunks": args.other_chunks,
+                                "broadcast": broadcast,
+                                "protocol": args.protocol,
+                                "devs": args.devs,
+                                "device_memory_limit": args.device_memory_limit,
+                                "rmm_pool": not args.disable_rmm_pool,
+                                "tcp": args.enable_tcp_over_ucx,
+                                "ib": args.enable_infiniband,
+                                "nvlink": args.enable_nvlink,
+                                "data_processed": data_processed,
+                                "wall_clock": took,
+                                "throughput": data_processed / took,
+                            },
+                            **bandwidths_json,
+                        )
+                    )
+                    + "\n"
+                )
 
     if args.multi_node:
         client.shutdown()

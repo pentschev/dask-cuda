@@ -10,6 +10,7 @@ import rmm
 
 from dask_cuda import CUDAWorker, LocalCUDACluster, utils
 from dask_cuda.initialize import initialize
+from dask_cuda.utils import MockWorker, get_gpu_count_mig
 
 _driver_version = rmm._cuda.gpu.driverGetVersion()
 _runtime_version = rmm._cuda.gpu.runtimeGetVersion()
@@ -51,10 +52,13 @@ async def test_local_cuda_cluster():
 # than 8 but as long as the test passes the errors can be ignored.
 @gen_test(timeout=20)
 async def test_with_subset_of_cuda_visible_devices():
-    os.environ["CUDA_VISIBLE_DEVICES"] = "2,3,6,7"
+    os.environ["CUDA_VISIBLE_DEVICES"] = "0,3,6,8"
     try:
         async with LocalCUDACluster(
-            scheduler_port=0, asynchronous=True, device_memory_limit=1
+            scheduler_port=0,
+            asynchronous=True,
+            device_memory_limit=1,
+            worker_class=MockWorker,
         ) as cluster:
             async with Client(cluster, asynchronous=True) as client:
                 assert len(cluster.workers) == 4
@@ -68,10 +72,10 @@ async def test_with_subset_of_cuda_visible_devices():
                 assert all(len(v.split(",")) == 4 for v in result.values())
                 for i in range(4):
                     assert {int(v.split(",")[i]) for v in result.values()} == {
-                        2,
+                        0,
                         3,
                         6,
-                        7,
+                        8,
                     }
     finally:
         del os.environ["CUDA_VISIBLE_DEVICES"]
@@ -106,7 +110,7 @@ async def test_ucx_protocol_type_error():
 @gen_test(timeout=20)
 async def test_n_workers():
     async with LocalCUDACluster(
-        CUDA_VISIBLE_DEVICES="0,1", asynchronous=True
+        CUDA_VISIBLE_DEVICES="0,1", worker_class=MockWorker, asynchronous=True
     ) as cluster:
         assert len(cluster.workers) == 2
         assert len(cluster.worker_spec) == 2
@@ -121,7 +125,7 @@ async def test_threads_per_worker():
 @gen_test(timeout=20)
 async def test_all_to_all():
     async with LocalCUDACluster(
-        CUDA_VISIBLE_DEVICES="0,1", asynchronous=True
+        CUDA_VISIBLE_DEVICES="0,1", worker_class=MockWorker, asynchronous=True
     ) as cluster:
         async with Client(cluster, asynchronous=True) as client:
             workers = list(client.scheduler_info()["workers"])
@@ -160,7 +164,7 @@ async def test_rmm_managed():
 
 
 @pytest.mark.skipif(
-    ((_driver_version, _runtime_version) < (11020, 11020)),
+    _driver_version < 11020 or _runtime_version < 11020,
     reason="cudaMallocAsync not supported",
 )
 @gen_test(timeout=20)
@@ -202,3 +206,40 @@ async def test_cluster_worker():
             await new_worker
             await client.wait_for_workers(2)
             await new_worker.close()
+
+
+@gen_test(timeout=20)
+async def test_available_mig_workers():
+    import dask
+
+    init_nvmlstatus = os.environ.get("DASK_DISTRIBUTED__DIAGNOSTICS__NVML")
+    try:
+        os.environ["DASK_DISTRIBUTED__DIAGNOSTICS__NVML"] = "False"
+        dask.config.refresh()
+        uuids = get_gpu_count_mig(return_uuids=True)[1]
+        if len(uuids) > 0:
+            uuids = [i.decode("utf-8") for i in uuids]
+        else:
+            pytest.skip("No MIG devices found")
+        CUDA_VISIBLE_DEVICES = ",".join(uuids)
+        os.environ["CUDA_VISIBLE_DEVICES"] = CUDA_VISIBLE_DEVICES
+        async with LocalCUDACluster(
+            CUDA_VISIBLE_DEVICES=CUDA_VISIBLE_DEVICES, asynchronous=True
+        ) as cluster:
+            async with Client(cluster, asynchronous=True) as client:
+                len(cluster.workers) == len(uuids)
+
+                # Check to see if CUDA_VISIBLE_DEVICES cycles properly
+                def get_visible_devices():
+                    return os.environ["CUDA_VISIBLE_DEVICES"]
+
+                result = await client.run(get_visible_devices)
+
+                assert all(len(v.split(",")) == len(uuids) for v in result.values())
+                for i in range(len(uuids)):
+                    assert set(v.split(",")[i] for v in result.values()) == set(uuids)
+    finally:
+        if "CUDA_VISIBLE_DEVICES" in os.environ:
+            del os.environ["CUDA_VISIBLE_DEVICES"]
+        if init_nvmlstatus:
+            os.environ["DASK_DISTRIBUTED__DIAGNOSTICS__NVML"] = init_nvmlstatus

@@ -35,8 +35,9 @@ def _get_dgx_name():
     if not os.path.isfile(product_name_file) or not os.path.isfile(dgx_release_file):
         return None
 
-    for line in open(product_name_file):
-        return line
+    with open(product_name_file) as f:
+        for line in f:
+            return line
 
 
 def _get_dgx_version():
@@ -170,12 +171,21 @@ def _test_ucx_infiniband_nvlink(enable_infiniband, enable_nvlink, enable_rdmacm)
     ucx_net_devices = None
     if enable_infiniband and not _ucx_110:
         ucx_net_devices = "auto"
-    if enable_rdmacm is True:
-        cm_protocol = "rdmacm"
-    elif _ucx_110 is True:
-        cm_protocol = "tcp"
+
+    if _ucx_110 is True:
+        cm_tls = ["tcp"]
+        if enable_rdmacm is True:
+            cm_tls_priority = "rdmacm"
+        else:
+            cm_tls_priority = "tcp"
     else:
-        cm_protocol = "sockcm"
+        cm_tls = ["tcp"]
+        if enable_rdmacm is True:
+            cm_tls.append("rdmacm")
+            cm_tls_priority = "rdmacm"
+        else:
+            cm_tls.append("sockcm")
+            cm_tls_priority = "sockcm"
 
     initialize(
         enable_tcp_over_ucx=True,
@@ -191,6 +201,7 @@ def _test_ucx_infiniband_nvlink(enable_infiniband, enable_nvlink, enable_rdmacm)
         enable_nvlink=enable_nvlink,
         enable_rdmacm=enable_rdmacm,
         ucx_net_devices=ucx_net_devices,
+        rmm_pool_size="1 GiB",
     ) as cluster:
         with Client(cluster) as client:
             res = da.from_array(cupy.arange(10000), chunks=(1000,), asarray=False)
@@ -202,8 +213,8 @@ def _test_ucx_infiniband_nvlink(enable_infiniband, enable_nvlink, enable_rdmacm)
                 assert "TLS" in conf
                 assert "tcp" in conf["TLS"]
                 assert "cuda_copy" in conf["TLS"]
-                assert cm_protocol in conf["TLS"]
-                assert cm_protocol in conf["SOCKADDR_TLS_PRIORITY"]
+                assert all(t in conf["TLS"] for t in cm_tls)
+                assert cm_tls_priority in conf["SOCKADDR_TLS_PRIORITY"]
                 if enable_nvlink:
                     assert "cuda_ipc" in conf["TLS"]
                 if enable_infiniband:
@@ -238,6 +249,10 @@ def _test_ucx_infiniband_nvlink(enable_infiniband, enable_nvlink, enable_rdmacm)
 def test_ucx_infiniband_nvlink(params):
     ucp = pytest.importorskip("ucp")  # NOQA: F841
 
+    if params["enable_infiniband"]:
+        if not any([at.startswith("rc") for at in ucp.get_active_transports()]):
+            pytest.skip("No support available for 'rc' transport in UCX")
+
     p = mp.Process(
         target=_test_ucx_infiniband_nvlink,
         args=(
@@ -248,6 +263,12 @@ def test_ucx_infiniband_nvlink(params):
     )
     p.start()
     p.join()
+
+    # Starting a new cluster on the same pytest process after an rdmacm cluster
+    # has been used may cause UCX-Py to complain about being already initialized.
+    if params["enable_rdmacm"] is True:
+        ucp.reset()
+
     assert not p.exitcode
 
 
@@ -263,13 +284,13 @@ def _test_dask_cuda_worker_ucx_net_devices(enable_rdmacm):
 
     # Enable proper variables for scheduler
     sched_env = os.environ.copy()
-    sched_env["DASK_UCX__INFINIBAND"] = "True"
-    sched_env["DASK_UCX__TCP"] = "True"
-    sched_env["DASK_UCX__CUDA_COPY"] = "True"
-    sched_env["DASK_UCX__NET_DEVICES"] = openfabrics_devices[0]
+    sched_env["DASK_DISTRIBUTED__COMM__UCX__INFINIBAND"] = "True"
+    sched_env["DASK_DISTRIBUTED__COMM__UCX__TCP"] = "True"
+    sched_env["DASK_DISTRIBUTED__COMM__UCX__CUDA_COPY"] = "True"
+    sched_env["DASK_DISTRIBUTED__COMM__UCX__NET_DEVICES"] = openfabrics_devices[0]
 
     if enable_rdmacm:
-        sched_env["DASK_UCX__RDMACM"] = "True"
+        sched_env["DASK_DISTRIBUTED__COMM__UCX__RDMACM"] = "True"
         sched_addr = get_ip_interface("ib0")
 
     sched_url = "ucx://" + sched_addr + ":9379"
@@ -356,12 +377,20 @@ def _test_dask_cuda_worker_ucx_net_devices(enable_rdmacm):
 def test_dask_cuda_worker_ucx_net_devices(enable_rdmacm):
     ucp = pytest.importorskip("ucp")  # NOQA: F841
 
-    if ucp.get_ucx_version() >= (1, 10, 0):
+    if _ucx_110:
         pytest.skip("UCX 1.10 and higher should rely on default UCX_NET_DEVICES")
+
+    if not any([at.startswith("rc") for at in ucp.get_active_transports()]):
+        pytest.skip("No support available for 'rc' transport in UCX")
 
     p = mp.Process(
         target=_test_dask_cuda_worker_ucx_net_devices, args=(enable_rdmacm,),
     )
     p.start()
     p.join()
+
+    # The processes may be killed in the test, preventing UCX-Py from cleaning
+    # up all objects. Reset to prevent issues on tests running after.
+    ucp.reset()
+
     assert not p.exitcode

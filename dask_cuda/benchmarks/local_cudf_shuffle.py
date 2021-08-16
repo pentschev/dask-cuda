@@ -1,4 +1,6 @@
+import contextlib
 from collections import defaultdict
+from json import dumps
 from time import perf_counter as clock
 from warnings import filterwarnings
 
@@ -21,29 +23,16 @@ from dask_cuda.benchmarks.utils import (
 from dask_cuda.utils import all_to_all
 
 
-def shuffle_dask(args, df, write_profile):
-    # Execute the operations to benchmark
-    if write_profile is not None:
-        with performance_report(filename=args.profile):
-            t1 = clock()
-            wait(shuffle(df, index="data", shuffle="tasks").persist())
-            took = clock() - t1
-    else:
-        t1 = clock()
-        wait(shuffle(df, index="data", shuffle="tasks").persist())
-        took = clock() - t1
-    return took
+def shuffle_dask(df):
+    wait(shuffle(df, index="data", shuffle="tasks").persist())
 
 
-def shuffle_explicit_comms(args, df):
-    t1 = clock()
+def shuffle_explicit_comms(df):
     wait(
         dask_cuda.explicit_comms.dataframe.shuffle.shuffle(
             df, column_names="data"
         ).persist()
     )
-    took = clock() - t1
-    return took
 
 
 def run(client, args, n_workers, write_profile=None):
@@ -63,12 +52,20 @@ def run(client, args, n_workers, write_profile=None):
     wait(df)
     data_processed = len(df) * sum([t.itemsize for t in df.dtypes])
 
-    if args.backend == "dask":
-        took = shuffle_dask(args, df, write_profile)
+    if write_profile is None:
+        ctx = contextlib.nullcontext()
     else:
-        took = shuffle_explicit_comms(args, df)
+        ctx = performance_report(filename=args.profile)
 
-    return (data_processed, took)
+    with ctx:
+        t1 = clock()
+        if args.backend == "dask":
+            shuffle_dask(df)
+        else:
+            shuffle_explicit_comms(df)
+        t2 = clock()
+
+    return (data_processed, t2 - t1)
 
 
 def main(args):
@@ -155,6 +152,8 @@ def main(args):
     print(f"in-parts       | {args.in_parts}")
     print(f"protocol       | {args.protocol}")
     print(f"device(s)      | {args.devs}")
+    if args.device_memory_limit:
+        print(f"memory-limit   | {format_bytes(args.device_memory_limit)}")
     print(f"rmm-pool       | {(not args.disable_rmm_pool)}")
     if args.protocol == "ucx":
         print(f"tcp            | {args.enable_tcp_over_ucx}")
@@ -181,17 +180,55 @@ def main(args):
     if args.backend == "dask":
         if args.markdown:
             print("<details>\n<summary>Worker-Worker Transfer Rates</summary>\n\n```")
-        print("(w1,w2)     | 25% 50% 75% (total nbytes)")
+        print("(w1,w2)        | 25% 50% 75% (total nbytes)")
         print("-------------------------------")
         for (d1, d2), bw in sorted(bandwidths.items()):
             fmt = (
-                "(%s,%s)     | %s %s %s (%s)"
+                "(%s,%s)        | %s %s %s (%s)"
                 if args.multi_node or args.sched_addr
-                else "(%02d,%02d)     | %s %s %s (%s)"
+                else "(%02d,%02d)        | %s %s %s (%s)"
             )
             print(fmt % (d1, d2, bw[0], bw[1], bw[2], total_nbytes[(d1, d2)]))
         if args.markdown:
             print("```\n</details>\n")
+
+    if args.benchmark_json:
+        bandwidths_json = {
+            "bandwidth_({d1},{d2})_{i}"
+            if args.multi_node or args.sched_addr
+            else "(%02d,%02d)_%s" % (d1, d2, i): parse_bytes(v.rstrip("/s"))
+            for (d1, d2), bw in sorted(bandwidths.items())
+            for i, v in zip(
+                ["25%", "50%", "75%", "total_nbytes"],
+                [bw[0], bw[1], bw[2], total_nbytes[(d1, d2)]],
+            )
+        }
+
+        with open(args.benchmark_json, "a") as fp:
+            for data_processed, took in took_list:
+                fp.write(
+                    dumps(
+                        dict(
+                            {
+                                "backend": args.backend,
+                                "partition_size": args.partition_size,
+                                "in_parts": args.in_parts,
+                                "protocol": args.protocol,
+                                "devs": args.devs,
+                                "device_memory_limit": args.device_memory_limit,
+                                "rmm_pool": not args.disable_rmm_pool,
+                                "tcp": args.enable_tcp_over_ucx,
+                                "ib": args.enable_infiniband,
+                                "nvlink": args.enable_nvlink,
+                                "data_processed": data_processed,
+                                "wall_clock": took,
+                                "throughput": data_processed / took,
+                            },
+                            **bandwidths_json,
+                        )
+                    )
+                    + "\n"
+                )
 
     if args.multi_node:
         client.shutdown()

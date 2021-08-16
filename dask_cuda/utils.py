@@ -9,8 +9,8 @@ import numpy as np
 import pynvml
 import toolz
 
-from distributed import wait
-from distributed.utils import parse_bytes
+from dask.utils import parse_bytes
+from distributed import Worker, wait
 
 try:
     from nvtx import annotate as nvtx_annotate
@@ -27,8 +27,10 @@ try:
     import ucp
 
     _ucx_110 = ucp.get_ucx_version() >= (1, 10, 0)
+    _ucx_111 = ucp.get_ucx_version() >= (1, 11, 0)
 except ImportError:
     _ucx_110 = False
+    _ucx_111 = False
 
 
 class CPUAffinity:
@@ -107,7 +109,7 @@ def unpack_bitmask(x, mask_bits=64):
         bytestr = np.frombuffer(
             bytes(np.binary_repr(mask, width=mask_bits), "utf-8"), "u1"
         )
-        mask = np.flip(bytestr - ord("0")).astype(np.bool)
+        mask = np.flip(bytestr - ord("0")).astype(bool)
         unpacked_mask = np.where(
             mask, np.arange(mask_bits) + cpu_offset, np.full(mask_bits, -1)
         )
@@ -128,13 +130,50 @@ def get_gpu_count():
     return pynvml.nvmlDeviceGetCount()
 
 
-def get_cpu_affinity(device_index):
-    """Get a list containing the CPU indices to which a GPU is directly connected.
+@toolz.memoize
+def get_gpu_count_mig(return_uuids=False):
+    """Return the number of MIG instances available
 
     Parameters
     ----------
-    device_index: int
-        Index of the GPU device
+    return_uuids: bool
+        Returns the uuids of the MIG instances available optionally
+
+    """
+    pynvml.nvmlInit()
+    uuids = []
+    for index in range(get_gpu_count()):
+        handle = pynvml.nvmlDeviceGetHandleByIndex(index)
+        try:
+            is_mig_mode = pynvml.nvmlDeviceGetMigMode(handle)[0]
+        except pynvml.NVMLError:
+            # if not a MIG device, i.e. a normal GPU, skip
+            continue
+        if is_mig_mode:
+            count = pynvml.nvmlDeviceGetMaxMigDeviceCount(handle)
+            miguuids = []
+            for i in range(count):
+                try:
+                    mighandle = pynvml.nvmlDeviceGetMigDeviceHandleByIndex(
+                        device=handle, index=i
+                    )
+                    miguuids.append(mighandle)
+                    uuids.append(pynvml.nvmlDeviceGetUUID(mighandle))
+                except pynvml.NVMLError:
+                    pass
+    if return_uuids:
+        return len(uuids), uuids
+    return len(uuids)
+
+
+def get_cpu_affinity(device_index=None):
+    """Get a list containing the CPU indices to which a GPU is directly connected.
+    Use either the device index or the specified device identifier UUID.
+
+    Parameters
+    ----------
+    device_index: int or str
+        Index or UUID of the GPU device
 
     Examples
     --------
@@ -156,10 +195,19 @@ def get_cpu_affinity(device_index):
     pynvml.nvmlInit()
 
     try:
+        if device_index and not str(device_index).isnumeric():
+            # This means device_index is UUID.
+            # This works for both MIG and non-MIG device UUIDs.
+            handle = pynvml.nvmlDeviceGetHandleByUUID(str.encode(device_index))
+            if pynvml.nvmlDeviceIsMigDeviceHandle(handle):
+                # Additionally get parent device handle
+                # if the device itself is a MIG instance
+                handle = pynvml.nvmlDeviceGetDeviceHandleFromMigDeviceHandle(handle)
+        else:
+            handle = pynvml.nvmlDeviceGetHandleByIndex(device_index)
         # Result is a list of 64-bit integers, thus ceil(get_cpu_count() / 64)
         affinity = pynvml.nvmlDeviceGetCpuAffinity(
-            pynvml.nvmlDeviceGetHandleByIndex(device_index),
-            math.ceil(get_cpu_count() / 64),
+            handle, math.ceil(get_cpu_count() / 64),
         )
         return unpack_bitmask(affinity)
     except pynvml.NVMLError:
@@ -179,17 +227,25 @@ def get_n_gpus():
 
 def get_device_total_memory(index=0):
     """
-    Return total memory of CUDA device with index
+    Return total memory of CUDA device with index or with device identifier UUID
     """
     pynvml.nvmlInit()
-    return pynvml.nvmlDeviceGetMemoryInfo(
-        pynvml.nvmlDeviceGetHandleByIndex(index)
-    ).total
+
+    if index and not str(index).isnumeric():
+        # This means index is UUID. This works for both MIG and non-MIG device UUIDs.
+        handle = pynvml.nvmlDeviceGetHandleByUUID(str.encode(str(index)))
+    else:
+        # This is a device index
+        handle = pynvml.nvmlDeviceGetHandleByIndex(index)
+    return pynvml.nvmlDeviceGetMemoryInfo(handle).total
 
 
 def get_ucx_net_devices(
     cuda_device_index, ucx_net_devices, get_openfabrics=True, get_network=False
 ):
+    if _ucx_111 and ucx_net_devices == "auto":
+        return None
+
     if cuda_device_index is None and (
         callable(ucx_net_devices) or ucx_net_devices == "auto"
     ):
@@ -248,7 +304,7 @@ def get_ucx_config(
         "rdmacm": None,
         "net-devices": None,
         "cuda_copy": None,
-        "reuse-endpoints": True,
+        "reuse-endpoints": not _ucx_111,
         "am": False,
     }
     if enable_tcp_over_ucx or enable_infiniband or enable_nvlink:
@@ -469,12 +525,13 @@ def parse_cuda_visible_device(dev):
     try:
         return int(dev)
     except ValueError:
-        if any(dev.startswith(prefix) for prefix in ["GPU-", "MIG-GPU-"]):
+        if any(dev.startswith(prefix) for prefix in ["GPU-", "MIG-GPU-", "MIG-"]):
             return dev
         else:
             raise ValueError(
                 "Devices in CUDA_VISIBLE_DEVICES must be comma-separated integers "
-                "or strings beginning with 'GPU-' or 'MIG-GPU-' prefixes."
+                "or strings beginning with 'GPU-' or 'MIG-GPU-' prefixes"
+                " or 'MIG-<UUID>'."
             )
 
 
@@ -501,6 +558,49 @@ def cuda_visible_devices(i, visible=None):
     return ",".join(map(str, L))
 
 
+def nvml_device_index(i, CUDA_VISIBLE_DEVICES):
+    """Get the device index for NVML addressing
+
+    NVML expects the index of the physical device, unlike CUDA runtime which
+    expects the address relative to `CUDA_VISIBLE_DEVICES`. This function
+    returns the i-th device index from the `CUDA_VISIBLE_DEVICES`
+    comma-separated string of devices or list.
+
+    Examples
+    --------
+    >>> nvml_device_index(1, "0,1,2,3")
+    1
+    >>> nvml_device_index(1, "1,2,3,0")
+    2
+    >>> nvml_device_index(1, [0,1,2,3])
+    1
+    >>> nvml_device_index(1, [1,2,3,0])
+    2
+    >>> nvml_device_index(1, ["GPU-84fd49f2-48ad-50e8-9f2e-3bf0dfd47ccb",
+                              "GPU-d6ac2d46-159b-5895-a854-cb745962ef0f",
+                              "GPU-158153b7-51d0-5908-a67c-f406bc86be17"])
+    "MIG-d6ac2d46-159b-5895-a854-cb745962ef0f"
+    >>> nvml_device_index(2, ["MIG-41b3359c-e721-56e5-8009-12e5797ed514",
+                              "MIG-65b79fff-6d3c-5490-a288-b31ec705f310",
+                              "MIG-c6e2bae8-46d4-5a7e-9a68-c6cf1f680ba0"])
+    "MIG-c6e2bae8-46d4-5a7e-9a68-c6cf1f680ba0"
+    >>> nvml_device_index(1, 2)
+    Traceback (most recent call last):
+    ...
+    ValueError: CUDA_VISIBLE_DEVICES must be `str` or `list`
+    """
+    if isinstance(CUDA_VISIBLE_DEVICES, str):
+        ith_elem = CUDA_VISIBLE_DEVICES.split(",")[i]
+        if ith_elem.isnumeric():
+            return int(ith_elem)
+        else:
+            return ith_elem
+    elif isinstance(CUDA_VISIBLE_DEVICES, list):
+        return CUDA_VISIBLE_DEVICES[i]
+    else:
+        raise ValueError("`CUDA_VISIBLE_DEVICES` must be `str` or `list`")
+
+
 def parse_device_memory_limit(device_memory_limit, device_index=0):
     """Parse memory limit to be used by a CUDA device.
 
@@ -511,8 +611,9 @@ def parse_device_memory_limit(device_memory_limit, device_index=0):
         This can be a float (fraction of total device memory), an integer (bytes),
         a string (like 5GB or 5000M), and "auto", 0 or None for the total device
         size.
-    device_index: int
-        The index of device from which to obtain the total memory amount.
+    device_index: int or str
+        The index or UUID of the device from which to obtain the total memory amount.
+        Default: 0.
 
     Examples
     --------
@@ -538,3 +639,28 @@ def parse_device_memory_limit(device_memory_limit, device_index=0):
         return parse_bytes(device_memory_limit)
     else:
         return int(device_memory_limit)
+
+
+class MockWorker(Worker):
+    """Mock Worker class preventing NVML from getting used by SystemMonitor.
+
+    By preventing the Worker from initializing NVML in the SystemMonitor, we can
+    mock test multiple devices in `CUDA_VISIBLE_DEVICES` behavior with single-GPU
+    machines.
+    """
+
+    def __init__(self, *args, **kwargs):
+        import distributed
+
+        distributed.diagnostics.nvml.device_get_count = MockWorker.device_get_count
+        self._device_get_count = distributed.diagnostics.nvml.device_get_count
+        super().__init__(*args, **kwargs)
+
+    def __del__(self):
+        import distributed
+
+        distributed.diagnostics.nvml.device_get_count = self._device_get_count
+
+    @staticmethod
+    def device_get_count():
+        return 0

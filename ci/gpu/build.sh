@@ -54,18 +54,18 @@ conda list --show-channel-urls
 
 # Fixing Numpy version to avoid RuntimeWarning: numpy.ufunc size changed, may
 # indicate binary incompatibility. Expected 192 from C header, got 216 from PyObject
-gpuci_conda_retry install "cudatoolkit=$CUDA_REL" \
+gpuci_mamba_retry install "cudatoolkit=$CUDA_REL" \
               "cudf=${MINOR_VERSION}" "dask-cudf=${MINOR_VERSION}" \
-              "ucx-py=$MINOR_VERSION.*" "ucx-proc=*=gpu" \
+              "ucx-py=0.21.*" "ucx-proc=*=gpu" \
               "rapids-build-env=$MINOR_VERSION.*"
 
 # Pin pytest-asyncio because latest versions modify the default asyncio
 # `event_loop_policy`. See https://github.com/dask/distributed/pull/4212 .
-gpuci_conda_retry install "pytest-asyncio=<0.14.0"
+gpuci_mamba_retry install "pytest-asyncio=<0.14.0"
 
 # https://docs.rapids.ai/maintainers/depmgmt/
-# gpuci_conda_retry remove -f rapids-build-env
-# gpuci_conda_retry install "your-pkg=1.0.0"
+# gpuci_mamba_retry remove -f rapids-build-env
+# gpuci_mamba_retry install "your-pkg=1.0.0"
 
 
 conda info
@@ -97,28 +97,16 @@ cd "$WORKSPACE"
 python -m pip install -e .
 
 ################################################################################
-# TEST - Run py.tests for ucx-py
+# TEST - Run pytests for ucx-py
 ################################################################################
 
 if hasArg --skip-tests; then
     gpuci_logger "Skipping Tests"
 else
-    gpuci_logger "Python py.test for dask-cuda"
+    gpuci_logger "Python pytest for dask-cuda"
     cd "$WORKSPACE"
     ls dask_cuda/tests/
-    UCXPY_IFNAME=eth0 UCX_WARN_UNUSED_ENV_VARS=n UCX_MEMTYPE_CACHE=n py.test -vs --cache-clear --basetemp="$WORKSPACE/dask-cuda-tmp" --junitxml="$WORKSPACE/junit-dask-cuda.xml" --cov-config=.coveragerc --cov=dask_cuda --cov-report=xml:"$WORKSPACE/dask-cuda-coverage.xml" --cov-report term dask_cuda/tests/
-
-    gpuci_logger "Running dask.distributed GPU tests"
-    # Test downstream packages, which requires Python v3.7
-    if [ $(python -c "import sys; print(sys.version_info[1])") -ge "7" ]; then
-        gpuci_logger "TEST OF DASK/UCX"
-        py.test --cache-clear -vs `python -c "import distributed.protocol.tests.test_cupy as m;print(m.__file__)"`
-        py.test --cache-clear -vs `python -c "import distributed.protocol.tests.test_numba as m;print(m.__file__)"`
-        py.test --cache-clear -vs `python -c "import distributed.protocol.tests.test_rmm as m;print(m.__file__)"`
-        py.test --cache-clear -vs `python -c "import distributed.protocol.tests.test_collection_cuda as m;print(m.__file__)"`
-        py.test --cache-clear -vs `python -c "import distributed.tests.test_nanny as m;print(m.__file__)"`
-        py.test --cache-clear -vs `python -c "import distributed.diagnostics.tests.test_nvml as m;print(m.__file__)"`
-    fi
+    UCXPY_IFNAME=eth0 UCX_WARN_UNUSED_ENV_VARS=n UCX_MEMTYPE_CACHE=n pytest -vs -Werror::DeprecationWarning -Werror::FutureWarning --cache-clear --basetemp="$WORKSPACE/dask-cuda-tmp" --junitxml="$WORKSPACE/junit-dask-cuda.xml" --cov-config=.coveragerc --cov=dask_cuda --cov-report=xml:"$WORKSPACE/dask-cuda-coverage.xml" --cov-report term dask_cuda/tests/
 
     logger "Run local benchmark..."
     python dask_cuda/benchmarks/local_cudf_shuffle.py --partition-size="1 KiB" -d 0  --runs 1 --backend dask

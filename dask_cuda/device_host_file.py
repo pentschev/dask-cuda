@@ -18,7 +18,6 @@ from distributed.protocol import (
 from distributed.sizeof import safe_sizeof
 from distributed.utils import nbytes
 
-from . import proxy_object
 from .is_device_object import is_device_object
 from .utils import nvtx_annotate
 
@@ -143,27 +142,6 @@ def host_to_device(s: DeviceSerialized) -> object:
     return deserialize(s.header, s.frames)
 
 
-@nvtx_annotate("SPILL_D2H", color="red", domain="dask_cuda")
-def pxy_obj_device_to_host(obj: object) -> proxy_object.ProxyObject:
-    try:
-        # Never re-serialize proxy objects.
-        if obj._obj_pxy["serializers"] is None:
-            return obj
-    except (KeyError, AttributeError):
-        pass
-
-    # Notice, both the "dask" and the "pickle" serializer will
-    # spill `obj` to main memory.
-    return proxy_object.asproxy(obj, serializers=("dask", "pickle"))
-
-
-@nvtx_annotate("SPILL_H2D", color="green", domain="dask_cuda")
-def pxy_obj_host_to_device(s: proxy_object.ProxyObject) -> object:
-    # Notice, we do _not_ deserialize at this point. The proxy
-    # object automatically deserialize just-in-time.
-    return s
-
-
 class DeviceHostFile(ZictBase):
     """Manages serialization/deserialization of objects.
 
@@ -200,7 +178,7 @@ class DeviceHostFile(ZictBase):
         if local_directory is None:
             local_directory = dask.config.get("temporary-directory") or os.getcwd()
 
-        if not os.path.exists(local_directory):
+        if local_directory and not os.path.exists(local_directory):
             os.makedirs(local_directory, exist_ok=True)
         local_directory = os.path.join(local_directory, "dask-worker-space")
 

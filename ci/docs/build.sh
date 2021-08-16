@@ -14,7 +14,7 @@ export DOCS_WORKSPACE=$WORKSPACE/docs
 export PATH=/conda/bin:/usr/local/cuda/bin:$PATH
 export HOME=$WORKSPACE
 export PROJECT_WORKSPACE=/rapids/dask-cuda
-export NIGHTLY_VERSION=$(echo $BRANCH_VERSION | awk -F. '{print $2}')
+export PROJECTS=(dask-cuda)
 
 gpuci_logger "Check environment..."
 env
