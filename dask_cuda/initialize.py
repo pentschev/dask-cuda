@@ -1,13 +1,60 @@
 import logging
+import os
+import warnings
 
 import click
 import numba.cuda
 
 import dask
+import distributed.comm.ucx
+from distributed.diagnostics.nvml import has_cuda_context
 
 from .utils import get_ucx_config
 
 logger = logging.getLogger(__name__)
+
+
+def _create_cuda_context():
+    try:
+        # Added here to ensure the parent `LocalCUDACluster` process creates the CUDA
+        # context directly from the UCX module, thus avoiding a similar warning there.
+        try:
+            distributed.comm.ucx.init_once()
+        except ModuleNotFoundError:
+            # UCX intialization has to be delegated to Distributed, it will take care
+            # of setting correct environment variables and importing `ucp` after that.
+            # Therefore if ``import ucp`` fails we can just continue here.
+            pass
+
+        cuda_visible_device = int(
+            os.environ.get("CUDA_VISIBLE_DEVICES", "0").split(",")[0]
+        )
+        ctx = has_cuda_context()
+        if ctx is not False and distributed.comm.ucx.cuda_context_created is False:
+            warnings.warn(
+                f"A CUDA context for device {ctx} already exists on process ID "
+                f"{os.getpid()}. This is often the result of a CUDA-enabled library "
+                "calling a CUDA runtime function before Dask-CUDA can spawn worker "
+                "processes. Please make sure any such function calls don't happen at "
+                "import time or in the global scope of a program."
+            )
+
+        numba.cuda.current_context()
+
+        if distributed.comm.ucx.cuda_context_created is False:
+            ctx = has_cuda_context()
+            if ctx is not False and ctx != cuda_visible_device:
+                warnings.warn(
+                    f"Worker with process ID {os.getpid()} should have a CUDA context "
+                    f"assigned to device {cuda_visible_device}, but instead the CUDA "
+                    f"context is on device {ctx}. This is often the result of a "
+                    "CUDA-enabled library calling a CUDA runtime function before "
+                    "Dask-CUDA can spawn worker processes. Please make sure any such "
+                    "function calls don't happen at import time or in the global scope "
+                    "of a program."
+                )
+    except Exception:
+        logger.error("Unable to start CUDA Context", exc_info=True)
 
 
 def initialize(
@@ -81,13 +128,6 @@ def initialize(
         it is callable. Can be an integer or ``None`` if ``net_devices`` is not
         callable.
     """
-
-    if create_cuda_context:
-        try:
-            numba.cuda.current_context()
-        except Exception:
-            logger.error("Unable to start CUDA Context", exc_info=True)
-
     ucx_config = get_ucx_config(
         enable_tcp_over_ucx=enable_tcp_over_ucx,
         enable_infiniband=enable_infiniband,
@@ -98,6 +138,9 @@ def initialize(
         cuda_device_index=cuda_device_index,
     )
     dask.config.set({"distributed.comm.ucx": ucx_config})
+
+    if create_cuda_context:
+        _create_cuda_context()
 
 
 @click.command()
@@ -149,7 +192,4 @@ def dask_setup(
     net_devices,
 ):
     if create_cuda_context:
-        try:
-            numba.cuda.current_context()
-        except Exception:
-            logger.error("Unable to start CUDA Context", exc_info=True)
+        _create_cuda_context()

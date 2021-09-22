@@ -277,9 +277,7 @@ class LocalCUDACluster(LocalCluster):
                     {
                         "device_memory_limit": self.device_memory_limit,
                         "memory_limit": self.host_memory_limit,
-                        "local_directory": local_directory
-                        or dask.config.get("temporary-directory")
-                        or os.getcwd(),
+                        "local_directory": local_directory,
                         "log_spilling": log_spilling,
                     },
                 )
@@ -313,7 +311,7 @@ class LocalCUDACluster(LocalCluster):
         elif ucx_net_devices == "":
             raise ValueError("ucx_net_devices can not be an empty string")
         self.ucx_net_devices = ucx_net_devices
-        self.set_ucx_net_devices = enable_infiniband
+        self.set_ucx_net_devices = enable_infiniband and ucx_net_devices is not None
         self.host = kwargs.get("host", None)
 
         initialize(
