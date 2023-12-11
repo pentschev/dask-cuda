@@ -17,7 +17,7 @@ from distributed.deploy.local import LocalCluster
 import dask_cuda
 from dask_cuda.explicit_comms import comms
 from dask_cuda.explicit_comms.dataframe.shuffle import shuffle as explicit_comms_shuffle
-from dask_cuda.utils_test import IncreasedCloseTimeoutNanny
+from dask_cuda.utils_test import IncreasedCloseTimeoutNanny, terminate_process
 
 mp = mp.get_context("spawn")  # type: ignore
 ucp = pytest.importorskip("ucp")
@@ -174,8 +174,7 @@ def test_dataframe_shuffle(backend, protocol, nworkers, _partitions):
     assert not p.exitcode
 
 
-@pytest.mark.parametrize("in_cluster", [True, False])
-def test_dask_use_explicit_comms(in_cluster):
+def _test_dask_use_explicit_comms(in_cluster):
     def check_shuffle():
         """Check if shuffle use explicit-comms by search for keys named
         'explicit-comms-shuffle'
@@ -215,6 +214,14 @@ def test_dask_use_explicit_comms(in_cluster):
                 check_shuffle()
     else:
         check_shuffle()
+
+
+@pytest.mark.parametrize("in_cluster", [True, False])
+def test_dask_use_explicit_comms(in_cluster):
+    p = mp.Process(target=_test_dask_use_explicit_comms, args=(in_cluster,))
+    p.start()
+    p.join(60)
+    terminate_process(p)
 
 
 def _test_dataframe_shuffle_merge(backend, protocol, n_workers):
